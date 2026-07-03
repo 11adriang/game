@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Sword &amp; Scroll — 8-Bit Bible Tales (KJV)</title>
+<style>
+html,body{margin:0;padding:0;background:#0d0b14;height:100%;overflow:hidden;touch-action:none;font-family:monospace}
+#wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+canvas{image-rendering:pixelated;image-rendering:crisp-edges;background:#000}
+#pad{position:fixed;bottom:8px;left:0;right:0;display:none;justify-content:space-between;padding:0 12px;z-index:5}
+.pbtn{width:50px;height:50px;border-radius:10px;background:rgba(240,181,65,.15);border:2px solid rgba(240,181,65,.5);color:#f0b541;font:bold 18px monospace;display:flex;align-items:center;justify-content:center;user-select:none;-webkit-user-select:none}
+#dpad{display:grid;grid-template-columns:50px 50px 50px;grid-template-rows:50px 50px 50px;gap:3px}
+#dpad .sp{border:none;background:none;pointer-events:none}
+@media (pointer:coarse){#pad{display:flex}}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="320" height="180"></canvas></div>
+<div id="pad">
+ <div id="dpad">
+  <div class="pbtn sp"></div><div class="pbtn" data-k="up">&#9650;</div><div class="pbtn sp"></div>
+  <div class="pbtn" data-k="left">&#9664;</div><div class="pbtn sp"></div><div class="pbtn" data-k="right">&#9654;</div>
+  <div class="pbtn sp"></div><div class="pbtn" data-k="down">&#9660;</div><div class="pbtn sp"></div>
+ </div>
+ <div style="display:flex;align-items:flex-end"><div class="pbtn" data-k="action" style="width:62px;height:62px;border-radius:50%">A</div></div>
+</div>
+<script>
+'use strict';
+/* ============ CORE ============ */
+const W=320,H=180;
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+function fit(){const padH=matchMedia('(pointer:coarse)').matches?115:0;let s=Math.min(innerWidth/W,(innerHeight-padH)/H);if(s>=2)s=Math.floor(s);cv.style.width=W*s+'px';cv.style.height=H*s+'px';}
+addEventListener('resize',fit);fit();
+
+const C={sand:'#e8c170',dsand:'#c99b4a',clay:'#b4553a',dclay:'#7a3b2e',night:'#1a1c3a',sky:'#7fb3d5',water:'#2a5a9a',dwater:'#1c3f70',green:'#5a8a3a',parch:'#f5ecd7',ink:'#181410',gold:'#f0b541',skin:'#d9a066',dskin:'#a5673f',red:'#a53030',gray:'#8a8680',iron:'#6b6f76',purple:'#5a3a6e',wood:'#8a5a2a',dwood:'#5e3c1c'};
+
+let rseed=1;function srand(s){rseed=(s>>>0)||1}
+function rnd(){rseed^=rseed<<13;rseed^=rseed>>>17;rseed^=rseed<<5;rseed>>>=0;return rseed/4294967296}
+function clamp(v,a,b){return v<a?a:v>b?b:v}
+function dist(ax,ay,bx,by){return Math.hypot(ax-bx,ay-by)}
+
+/* ============ INPUT ============ */
+const keys={left:false,right:false,up:false,down:false,action:false};
+const lastKeys={},edge={};let actQ=false;
+const KEYMAP={ArrowLeft:'left',a:'left',A:'left',ArrowRight:'right',d:'right',D:'right',ArrowUp:'up',w:'up',W:'up',ArrowDown:'down',s:'down',S:'down',' ':'action',Enter:'action'};
+addEventListener('keydown',e=>{const k=KEYMAP[e.key];if(k){if(k==='action')actQ=true;keys[k]=true;e.preventDefault();audioInit();}if(e.key==='m'||e.key==='M')musicOn=!musicOn;});
+addEventListener('keyup',e=>{const k=KEYMAP[e.key];if(k)keys[k]=false;});
+document.querySelectorAll('.pbtn[data-k]').forEach(b=>{const k=b.dataset.k;
+ const on=e=>{e.preventDefault();if(k==='action')actQ=true;keys[k]=true;audioInit();};
+ const off=e=>{e.preventDefault();keys[k]=false;};
+ b.addEventListener('touchstart',on,{passive:false});b.addEventListener('touchend',off);b.addEventListener('touchcancel',off);
+ b.addEventListener('mousedown',on);b.addEventListener('mouseup',off);b.addEventListener('mouseleave',off);});
+let clickPt=null;
+cv.addEventListener('pointerdown',e=>{audioInit();const r=cv.getBoundingClientRect();clickPt={x:(e.clientX-r.left)/r.width*W,y:(e.clientY-r.top)/r.height*H};});
+function updEdges(){for(const k in keys){edge[k]=keys[k]&&!lastKeys[k];lastKeys[k]=keys[k];}if(actQ){edge.action=true;actQ=false;}}
+function tap(){if(clickPt){clickPt=null;return true}return false}
+
+/* ============ AUDIO (all procedural) ============ */
+let AC=null,masterGain=null,musicOn=true;
+function audioInit(){if(AC)return;try{AC=new (window.AudioContext||window.webkitAudioContext)();masterGain=AC.createGain();masterGain.gain.value=.5;masterGain.connect(AC.destination);}catch(e){}}
+function tone(f,dur,type,vol,slide,when){if(!AC)return;type=type||'square';vol=vol||.3;slide=slide||0;when=when||0;
+ const t=AC.currentTime+when,o=AC.createOscillator(),g=AC.createGain();
+ o.type=type;o.frequency.setValueAtTime(f,t);
+ if(slide)o.frequency.exponentialRampToValueAtTime(Math.max(20,f+slide),t+dur);
+ g.gain.setValueAtTime(vol,t);g.gain.exponentialRampToValueAtTime(.001,t+dur);
+ o.connect(g);g.connect(masterGain);o.start(t);o.stop(t+dur+.02);}
+function noiseSfx(dur,vol,fc,when){if(!AC)return;vol=vol||.3;fc=fc||1000;when=when||0;
+ const t=AC.currentTime+when,len=Math.floor(AC.sampleRate*dur),buf=AC.createBuffer(1,len,AC.sampleRate),d=buf.getChannelData(0);
+ for(let i=0;i<len;i++)d[i]=Math.random()*2-1;
+ const n=AC.createBufferSource();n.buffer=buf;
+ const f=AC.createBiquadFilter();f.type='lowpass';f.frequency.value=fc;
+ const g=AC.createGain();g.gain.setValueAtTime(vol,t);g.gain.exponentialRampToValueAtTime(.001,t+dur);
+ n.connect(f);f.connect(g);g.connect(masterGain);n.start(t);}
+const sfx={
+ shoot(){tone(600,.15,'square',.22,-420)},
+ clank(){tone(180,.08,'square',.2,-60)},
+ hit(){noiseSfx(.18,.32,900)},
+ pick(){tone(700,.07,'square',.2);tone(1050,.09,'square',.2,0,.07)},
+ trumpet(){[349,440,523].forEach((f,i)=>{tone(f,.55,'sawtooth',.16,25,i*.03)})},
+ blast(){[293,370,440,587].forEach((f,i)=>{tone(f,.9,'sawtooth',.15,30,i*.02)});noiseSfx(.5,.25,600,.15)},
+ thunder(){noiseSfx(1.1,.4,280)},
+ roar(){tone(85,.5,'sawtooth',.28,-40);noiseSfx(.5,.2,400)},
+ splash(){noiseSfx(.3,.3,1600)},
+ pray(){tone(880,.3,'triangle',.22);tone(1174.7,.4,'triangle',.18,0,.15)},
+ angel(){[784,988,1175,1568].forEach((f,i)=>tone(f,.4,'triangle',.18,0,i*.1))},
+ win(){[523,659,784,1046].forEach((f,i)=>tone(f,.26,'square',.22,0,i*.14))},
+ lose(){[392,330,262,196].forEach((f,i)=>tone(f,.3,'triangle',.24,0,i*.18))},
+ step(){tone(160,.04,'square',.06)}
+};
+/* Menu music: hijaz (double harmonic) mode on D — Middle Eastern scale, generated by pattern math */
+let mNext=0,mStep=0;
+const HIJAZ=[293.66,311.13,370.0,392.0,440.0,466.16,554.37,587.33];
+const MPAT=[0,2,1,0,3,2,4,3,5,4,3,2,1,2,0,-1,0,1,2,4,3,2,4,5,7,5,4,3,2,1,0,-1];
+function musicTick(){if(!AC||!musicOn||screen!=='menu'){if(AC)mNext=AC.currentTime;return}
+ while(mNext<AC.currentTime+.25){const i=MPAT[mStep%MPAT.length];const w=mNext-AC.currentTime;
+  if(i>=0)tone(HIJAZ[i],.22,'triangle',.055,0,Math.max(0,w));
+  if(mStep%8===0)tone(HIJAZ[0]/2,.9,'sine',.045,0,Math.max(0,w));
+  mNext+=.26;mStep++;}}
+
+/* ============ DRAW HELPERS ============ */
+function px(x,y,w,h,c){ctx.fillStyle=c;ctx.fillRect(x|0,y|0,w,h);}
+function text(str,x,y,c,size,align){ctx.fillStyle=c||C.parch;ctx.font=(size||7)+'px monospace';ctx.textAlign=align||'left';ctx.textBaseline='top';ctx.fillText(str,x,y);}
+function wrap(str,maxChars){const words=str.split(' '),lines=[];let cur='';
+ for(const w2 of words){if((cur+' '+w2).trim().length>maxChars){lines.push(cur.trim());cur=w2;}else cur+=' '+w2;}
+ if(cur.trim())lines.push(cur.trim());return lines;}
+function bar(x,y,w,frac,c){px(x,y,w,5,C.ink);px(x,y,w,1,C.gold);px(x,y+4,w,1,C.gold);px(x+1,y+1,Math.round((w-2)*clamp(frac,0,1)),3,c);}
+function hearts(n){for(let i=0;i<n;i++){const x=6+i*9,y=4;px(x,y,2,2,C.red);px(x+3,y,2,2,C.red);px(x,y+1,5,2,C.red);px(x+1,y+3,3,1,C.red);px(x+2,y+4,1,1,C.red);}}
+/* Middle-eastern zigzag border motif */
+function zig(y,c){for(let x=0;x<W;x+=8){px(x,y,4,2,c);px(x+4,y+2,4,2,c);}}
+/* small robed figure, ~8x12 */
+function dude(x,y,o){o=o||{};const f=(o.f|0)%2,skin=o.skin||C.skin,robe=o.robe||C.clay,lc='#4a2e1a';
+ if(o.head){px(x+1,y-1,6,2,o.head);px(x+1,y+1,1,4,o.head);px(x+6,y+1,1,4,o.head);}
+ else if(o.hair)px(x+2,y-1,4,1,o.hair);
+ px(x+2,y,4,3,skin);
+ px(x+(o.flip?2:4),y+1,1,1,C.ink);
+ if(o.beard)px(x+2,y+3,4,o.bl||1,o.beard);
+ px(x+1,y+4,6,6,robe);
+ if(o.trim)px(x+1,y+9,6,1,o.trim);
+ px(x+2,y+10,2,f?1:2,lc);px(x+4,y+10,2,f?2:1,lc);
+ if(o.staff){px(x+(o.flip?-1:8),y-2,1,13,C.wood);}
+ if(o.torch){const tx=x+(o.flip?-1:8);px(tx,y+1,1,6,C.wood);px(tx-1,y-2,3,3,C.gold);px(tx,y-3,1,1,C.red);}
+ if(o.trumpetp){px(x+(o.flip?-3:8),y+2,4,1,C.gold);px(x+(o.flip?-4:11),y+1,1,3,C.gold);}}
+function lionDraw(x,y,f,sleep){const c=C.dsand,m='#8a5a2a';
+ px(x,y+2,10,5,c);px(x+8,y,5,6,m);px(x+9,y+1,3,3,c);
+ if(!sleep)px(x+11,y+2,1,1,C.ink);
+ px(x-2,y+2,2,1,c);px(x-3,y+1,1,1,m);
+ px(x+1,y+7,2,3,c);px(x+6+(f?1:0),y+7,2,3,c);
+ if(sleep)text('z',x+12,y-6,C.parch,6);}
+function angelDraw(x,y,t){ctx.fillStyle='rgba(245,236,215,.18)';ctx.fillRect(x-9,y-4,26,22);
+ px(x-8,y+3,6,7,C.parch);px(x+10,y+3,6,7,C.parch);
+ dude(x,y,{robe:C.parch,skin:'#e8c8a0',beard:false});
+ px(x+2,y-3,4,1,C.gold);
+ const s=Math.sin(t*6)>0;if(s){px(x-9,y+2,2,2,C.gold);px(x+15,y+2,2,2,C.gold);}}
+function ramDraw(x,y){px(x,y,9,5,'#cbbca0');px(x+1,y+5,2,3,'#9a8c72');px(x+6,y+5,2,3,'#9a8c72');
+ px(x+7,y-2,4,4,'#b0a284');px(x+10,y-1,1,1,C.ink);
+ px(x+10,y-4,2,2,C.gray);px(x+12,y-3,1,3,C.gray);px(x+11,y-1,1,1,C.gray);}
+
+/* ============ PORTRAITS (procedural, parameterized) ============ */
+function drawPortrait(x,y,s,o){
+ // face
+ px(x+4*s,y+3*s,8*s,6*s,o.skin);
+ px(x+6*s,y+5*s,s,s,C.ink);px(x+9*s,y+5*s,s,s,C.ink);
+ px(x+7*s,y+6*s,2*s,s,o.skinD||C.dskin);
+ // headwear
+ if(o.headType==='cloth'){px(x+3*s,y+1*s,10*s,2*s,o.head);px(x+3*s,y+3*s,s,7*s,o.head);px(x+12*s,y+3*s,s,7*s,o.head);px(x+3*s,y+2*s,10*s,s,o.band||C.gold);}
+ else if(o.headType==='helmet'){px(x+4*s,y+1*s,8*s,3*s,o.head);px(x+3*s,y+3*s,s,3*s,o.head);px(x+12*s,y+3*s,s,3*s,o.head);px(x+6*s,y,4*s,s,C.red);}
+ else if(o.headType==='cap'){px(x+4*s,y+1*s,8*s,2*s,o.head);px(x+4*s,y+2*s,8*s,s,o.band||C.gold);}
+ else if(o.headType==='hair'){px(x+4*s,y+1*s,8*s,2*s,o.hair);px(x+3*s,y+2*s,s,4*s,o.hair);px(x+12*s,y+2*s,s,4*s,o.hair);}
+ // beard
+ if(o.beardLen){px(x+4*s,y+8*s,8*s,o.beardLen*s,o.beard);px(x+7*s,y+8*s,2*s,s,o.skinD||C.dskin);}
+ // shoulders
+ px(x+2*s,y+12*s,12*s,4*s,o.robe);
+ px(x+7*s,y+12*s,2*s,4*s,o.trim||o.head||C.gold);
+}
+const PORTS={
+ abraham:{skin:C.skin,headType:'cloth',head:C.parch,band:C.dclay,beard:'#c9c2b4',beardLen:4,robe:C.wood,trim:C.gold},
+ noah:{skin:'#cf9a5e',headType:'cloth',head:'#7a8a9a',band:'#4a5a6a',beard:'#e8e2d4',beardLen:5,robe:'#4a5a6a',trim:C.parch},
+ moses:{skin:C.skin,headType:'cloth',head:C.parch,band:C.clay,beard:'#e8e2d4',beardLen:5,robe:C.clay,trim:C.gold},
+ joshua:{skin:'#c78d52',headType:'helmet',head:'#b08d3e',beard:'#3a2a1a',beardLen:2,robe:C.iron,trim:C.red},
+ gideon:{skin:C.skin,headType:'hair',hair:'#3a2a1a',beard:'#3a2a1a',beardLen:2,robe:C.green,trim:C.wood},
+ david:{skin:'#e0a875',headType:'hair',hair:'#8a4a2a',beardLen:0,robe:C.sand,trim:C.clay},
+ daniel:{skin:C.skin,headType:'cap',head:C.purple,band:C.gold,beard:'#2a1e14',beardLen:3,robe:C.purple,trim:C.gold},
+ peter:{skin:'#cf9a5e',headType:'hair',hair:'#5e3c1c',beard:'#5e3c1c',beardLen:3,robe:'#2e6e6a',trim:C.parch}
+};
+
+/* ============ STORY DATA (all scripture: KJV) ============ */
+const STORIES=[
+{id:'abraham',name:'ABRAHAM',title:'THE MOUNT OF THE LORD',ref:'Genesis 22',port:PORTS.abraham,make:makeAbraham,
+ verses:['"Take now thy son, thine only son Isaac, whom thou lovest, and get thee into the land of Moriah; and offer him there for a burnt offering..." — Genesis 22:2',
+ '"And they went both of them together." — Genesis 22:6'],
+ objective:'Climb Mount Moriah with Isaac. Leap the clefts, dodge the rolling stones, and reach the altar. Then heed the voice of the angel.',
+ winVerse:'"In thy seed shall all the nations of the earth be blessed; because thou hast obeyed my voice." — Genesis 22:18',
+ loseVerse:'"And Abraham lifted up his eyes, and saw the place afar off." — Genesis 22:4 — Climb again.'},
+{id:'noah',name:'NOAH',title:'TWO OF EVERY SORT',ref:'Genesis 6-7',port:PORTS.noah,make:makeNoah,
+ verses:['"Make thee an ark of gopher wood..." — Genesis 6:14',
+ '"And of every living thing of all flesh, two of every sort shalt thou bring into the ark, to keep them alive with thee..." — Genesis 6:19'],
+ objective:'Lead every pair of beasts (walk near them, they will follow) to the ark door before the rain begins. Then enter the ark yourself.',
+ winVerse:'"And they that went in, went in male and female of all flesh, as God had commanded him: and the LORD shut him in." — Genesis 7:16',
+ loseVerse:'"And the rain was upon the earth forty days and forty nights." — Genesis 7:12 — The flood came. Try again.'},
+{id:'moses',name:'MOSES',title:'THROUGH THE MIDST OF THE SEA',ref:'Exodus 14',port:PORTS.moses,make:makeMoses,
+ verses:['"Fear ye not, stand still, and see the salvation of the LORD..." — Exodus 14:13',
+ '"...and the waters were a wall unto them on their right hand, and on their left." — Exodus 14:22'],
+ objective:'Lead Israel through the sea upon dry ground. Weave past the rocks and pools of mire — the chariots of Pharaoh pursue behind.',
+ winVerse:'"Thus the LORD saved Israel that day out of the hand of the Egyptians..." — Exodus 14:30',
+ loseVerse:'"But the Egyptians pursued after them, all the horses and chariots of Pharaoh..." — Exodus 14:9 — Go again.'},
+{id:'joshua',name:'JOSHUA',title:'THE WALLS OF JERICHO',ref:'Joshua 6',port:PORTS.joshua,make:makeJoshua,
+ verses:['"See, I have given into thine hand Jericho, and the king thereof, and the mighty men of valour." — Joshua 6:2',
+ '"...ye shall compass the city seven times, and the priests shall blow with the trumpets." — Joshua 6:4'],
+ objective:'March around Jericho seven times, dodging the darts of the watchmen. On the seventh circuit — SHOUT (press A).',
+ winVerse:'"...the people shouted with a great shout, that the wall fell down flat..." — Joshua 6:20',
+ loseVerse:'"And it shall come to pass, that when they make a long blast..." — Joshua 6:5 — March again.'},
+{id:'gideon',name:'GIDEON',title:'THREE HUNDRED MEN',ref:'Judges 7',port:PORTS.gideon,make:makeGideon,
+ verses:['"The people that are with thee are too many for me to give the Midianites into their hands..." — Judges 7:2',
+ '"And he divided the three hundred men into three companies, and he put a trumpet in every man\'s hand, with empty pitchers, and lamps within the pitchers." — Judges 7:16'],
+ objective:'By night, set your three companies about the camp of Midian (press A at each mark) — unseen by the watch. Then blow the trumpet and break the pitchers.',
+ winVerse:'"The sword of the LORD, and of Gideon... and all the host ran, and cried, and fled." — Judges 7:20-21',
+ loseVerse:'"And the Midianites... lay along in the valley like grasshoppers for multitude." — Judges 7:12 — You were seen. Try again.'},
+{id:'david',name:'DAVID',title:'FIVE SMOOTH STONES',ref:'1 Samuel 17',port:PORTS.david,make:makeDavid,
+ verses:['"And he took his staff in his hand, and chose him five smooth stones out of the brook... and his sling was in his hand: and he drew near to the Philistine." — 1 Samuel 17:40',
+ '"Thou comest to me with a sword, and with a spear, and with a shield: but I come to thee in the name of the LORD of hosts..." — 1 Samuel 17:45'],
+ objective:'Five smooth stones. Aim with UP/DOWN, sling with A. Strike the giant in his FOREHEAD — his armour turns all else aside. Step aside from his spear.',
+ winVerse:'"So David prevailed over the Philistine with a sling and with a stone, and smote the Philistine, and slew him..." — 1 Samuel 17:50',
+ loseVerse:'"Am I a dog, that thou comest to me with staves?" — 1 Samuel 17:43 — Stand again in the name of the LORD.'},
+{id:'daniel',name:'DANIEL',title:'THE DEN OF LIONS',ref:'Daniel 6',port:PORTS.daniel,make:makeDaniel,
+ verses:['"...he kneeled upon his knees three times a day, and prayed, and gave thanks before his God, as he did aforetime." — Daniel 6:10',
+ '"Then the king commanded, and they brought Daniel, and cast him into the den of lions." — Daniel 6:16'],
+ objective:'Kneel and pray at the open windows three times (hold A). Let no lion touch you before the angel of God comes.',
+ winVerse:'"My God hath sent his angel, and hath shut the lions\' mouths, that they have not hurt me..." — Daniel 6:22',
+ loseVerse:'"...and the lions had the mastery of them, and brake all their bones..." — Daniel 6:24 — Endure the night again.'},
+{id:'peter',name:'PETER',title:'HE WALKED ON THE WATER',ref:'Matthew 14',port:PORTS.peter,make:makePeter,
+ verses:['"And he said, Come. And when Peter was come down out of the ship, he walked on the water, to go to Jesus." — Matthew 14:29'],
+ objective:'Walk across the sea to Jesus. When the wind is boisterous, hold A to look to Him and keep your faith — or you will begin to sink.',
+ winVerse:'"And when they were come into the ship, the wind ceased. Then they that were in the ship came and worshipped him, saying, Of a truth thou art the Son of God." — Matthew 14:32-33',
+ loseVerse:'"But when he saw the wind boisterous, he was afraid; and beginning to sink, he cried, saying, Lord, save me." — Matthew 14:30'}
+];
+
+/* ============ SCREENS ============ */
+let screen='menu',story=null,game=null,selIdx=0,tGlobal=0,loseMsg='';
+function startStory(s){story=s;screen='intro';sfx.pick();}
+function startGame(){game=story.make();screen='game';}
+function gameWin(){screen='win';sfx.win();}
+function gameLose(msg){loseMsg=msg||story.loseVerse;screen='lose';sfx.lose();}
+
+function menuUpdate(){
+ if(edge.left)selIdx=(selIdx+7)%8,sfx.step();
+ if(edge.right)selIdx=(selIdx+1)%8,sfx.step();
+ if(edge.up||edge.down)selIdx=(selIdx+4)%8,sfx.step();
+ if(clickPt){for(let i=0;i<8;i++){const cx=8+(i%4)*77,cy2=i<4?46:112;
+  if(clickPt.x>=cx&&clickPt.x<cx+72&&clickPt.y>=cy2&&clickPt.y<cy2+58){
+   if(selIdx===i)startStory(STORIES[i]);else{selIdx=i;sfx.step();}
+   clickPt=null;break;}}}
+ if(edge.action)startStory(STORIES[selIdx]);
+}
+function menuDraw(){
+ px(0,0,W,H,C.night);
+ srand(7);for(let i=0;i<70;i++){px((rnd()*W)|0,(rnd()*95)|0,1,1,rnd()<.25?C.gold:C.parch);}
+ // crescent moon
+ px(276,12,14,14,C.parch);px(272,10,12,14,C.night);
+ // distant city: domes & towers
+ srand(31);for(let x=6;x<W;x+=26){const h=8+((rnd()*10)|0);
+  px(x,100-h,10,h,'#241c2e');px(x+2,96-h,6,4,'#241c2e');
+  if(rnd()<.5){px(x+16,92,3,8,'#241c2e');px(x+15,90,5,2,'#241c2e');}}
+ px(0,100,W,80,'#3a2c22');
+ for(let x=0;x<W;x+=2){const h=Math.sin(x*.03)*4+Math.sin(x*.09+2)*2;px(x,104+h,2,76,'#4a3a2e');}
+ zig(0,C.gold);zig(H-4,C.gold);
+ text('SWORD & SCROLL',W/2,12,C.gold,16,'center');
+ text('8-BIT TALES FROM THE KING JAMES BIBLE',W/2,30,C.parch,7,'center');
+ for(let i=0;i<8;i++){const st=STORIES[i],cx=8+(i%4)*77,cy2=i<4?46:112,sel=i===selIdx;
+  px(cx,cy2,72,58,sel?'#3a2e1a':'#241c14');
+  ctx.strokeStyle=sel?C.gold:'#5e4a2a';ctx.lineWidth=1;ctx.strokeRect(cx+.5,cy2+.5,71,57);
+  if(sel&&Math.sin(tGlobal*6)>0){px(cx+2,cy2+2,3,3,C.gold);px(cx+67,cy2+2,3,3,C.gold);px(cx+2,cy2+53,3,3,C.gold);px(cx+67,cy2+53,3,3,C.gold);}
+  drawPortrait(cx+20,cy2+4,2,st.port);
+  text(st.name,cx+36,cy2+42,sel?C.gold:C.parch,7,'center');}
+ text('ARROWS/TAP: SELECT   A/SPACE: PLAY   M: MUSIC',W/2,172,C.dsand,6,'center');
+}
+function introDraw(){
+ px(0,0,W,H,'#241c14');zig(2,C.gold);zig(H-6,C.gold);
+ drawPortrait(12,14,3,story.port);
+ text(story.name,66,16,C.gold,12);
+ text(story.title+'  ('+story.ref+', KJV)',66,32,C.parch,7);
+ let y=68;
+ for(const v of story.verses){for(const ln of wrap(v,70)){text(ln,12,y,C.sand,7);y+=9;}y+=3;}
+ y+=2;for(const ln of wrap('OBJECTIVE: '+story.objective,70)){text(ln,12,y,C.parch,7);y+=9;}
+ text('PRESS A / SPACE / TAP TO BEGIN',W/2,H-16,Math.sin(tGlobal*5)>0?C.gold:C.dsand,7,'center');
+}
+function winDraw(){
+ px(0,0,W,H,'#1a2414');zig(2,C.gold);zig(H-6,C.gold);
+ text('VICTORY',W/2,20,C.gold,16,'center');
+ text(story.name+' — '+story.title,W/2,40,C.parch,7,'center');
+ let y=64;for(const ln of wrap(story.winVerse,66)){text(ln,W/2,y,C.sand,7,'center');y+=10;}
+ text('A / TAP — RETURN TO THE SCROLL',W/2,H-18,Math.sin(tGlobal*5)>0?C.gold:C.dsand,7,'center');
+}
+function loseDraw(){
+ px(0,0,W,H,'#2a1414');zig(2,C.clay);zig(H-6,C.clay);
+ text('BE STRONG, TRY AGAIN',W/2,22,C.clay,12,'center');
+ let y=58;for(const ln of wrap(loseMsg,66)){text(ln,W/2,y,C.sand,7,'center');y+=10;}
+ text('A / TAP — TRY AGAIN     DOWN + A — MENU',W/2,H-18,Math.sin(tGlobal*5)>0?C.gold:C.dsand,7,'center');
+}
+
+/* ============ TRAIL (followers) ============ */
+function makeTrail(x,y){const a=[{x:x,y:y}];return{
+ push(px2,py2){a.push({x:px2,y:py2});if(a.length>400)a.shift();},
+ get(i){return a[Math.max(0,a.length-1-i)]||a[0];}};}
+
+/* ============ GAME 6: DAVID (1 Samuel 17) ============ */
+function makeDavid(){
+ const groundY=152;
+ const p={x:36};let aim=-.6,stones=5,walkF=0;
+ const gol={x:298,down:false,fallT:0,f:0};
+ let projs=[],spears=[],spearT=3;
+ function goliathDraw(x,y,f,down){
+  if(down){px(x-26,y-9,36,8,C.iron);px(x-33,y-9,7,7,C.skin);px(x-35,y-11,9,5,'#b08d3e');
+   px(x+2,y-13,2,10,C.wood);return;}
+  px(x-8,y-14,6,14,'#7a5a3a');px(x+2,y-14+(f?2:0),6,14-(f?2:0),'#7a5a3a');
+  px(x-11,y-34,22,20,C.iron);px(x-11,y-29,22,1,'#565a60');px(x-11,y-23,22,1,'#565a60');
+  px(x-15,y-33,4,14,C.skin);px(x+11,y-33,4,14,C.skin);
+  px(x+13,y-58,2,36,C.wood);px(x+12,y-62,4,5,C.gray);
+  px(x-19,y-30,7,15,C.clay);px(x-18,y-28,5,1,C.gold);
+  px(x-5,y-44,10,10,C.skin);
+  px(x-7,y-48,14,5,'#b08d3e');px(x-7,y-43,2,7,'#b08d3e');px(x+5,y-43,2,7,'#b08d3e');
+  px(x-2,y-52,4,4,C.red);
+  px(x-3,y-40,2,2,C.ink);px(x+2,y-40,2,2,C.ink);
+  px(x-4,y-35,8,3,'#3a2a1a');}
+ return{
+ update(dt){
+  if(gol.down){gol.fallT+=dt;if(gol.fallT>1.8)gameWin();return;}
+  walkF+=dt*6;gol.f=(tGlobal*4)|0;
+  if(keys.left)p.x-=52*dt;if(keys.right)p.x+=52*dt;p.x=clamp(p.x,8,130);
+  if(keys.up)aim-=1.3*dt;if(keys.down)aim+=1.3*dt;aim=clamp(aim,-1.3,-.08);
+  if(edge.action&&stones>0){stones--;sfx.shoot();
+   projs.push({x:p.x+7,y:groundY-16,vx:Math.cos(aim)*165,vy:Math.sin(aim)*165});}
+  gol.x-=6.5*dt;
+  if(gol.x<p.x+30)return gameLose('"And the Philistine came on and drew near unto David..." — 1 Samuel 17:41 — He came too close. Stand again.');
+  spearT-=dt;
+  if(spearT<=0){spearT=2.8+Math.random()*1.6;sfx.shoot();
+   spears.push({x:gol.x+10,y:groundY-56,vx:-118,vy:-20});}
+  for(const sp of spears){sp.x+=sp.vx*dt;sp.vy+=130*dt;sp.y+=sp.vy*dt;
+   if(Math.abs(sp.x-(p.x+4))<6&&sp.y>groundY-18&&sp.y<groundY)return gameLose(story.loseVerse);}
+  spears=spears.filter(sp=>sp.x>-12&&sp.y<H);
+  for(const q of projs){q.x+=q.vx*dt;q.vy+=130*dt;q.y+=q.vy*dt;
+   if(!gol.down&&q.x>gol.x-8&&q.x<gol.x+8&&q.y>groundY-50&&q.y<groundY-40){gol.down=true;sfx.hit();sfx.blast();}
+   else if(q.x>gol.x-12&&q.x<gol.x+12&&q.y>groundY-40&&q.y<groundY){q.dead=true;sfx.clank();}}
+  projs=projs.filter(q=>!q.dead&&q.y<groundY&&q.x<W+12);
+  if(stones===0&&projs.length===0&&!gol.down)
+   return gameLose('The five smooth stones are spent. — "...and chose him five smooth stones out of the brook..." (1 Samuel 17:40) Choose again.');
+ },
+ draw(){
+  px(0,0,W,64,C.sky);px(0,64,W,36,'#a9cbe0');
+  px(292,10,14,14,C.gold);
+  // two hillsides with hosts (17:3)
+  for(let x=0;x<W;x+=2){const h=Math.sin(x*.02)*8+14;px(x,100-h,2,h+2,C.dsand);}
+  srand(11);for(let i=0;i<16;i++){const hx=(rnd()*120)|0;px(hx,84+((rnd()*6)|0),2,3,'#5e4a2a');}
+  for(let i=0;i<16;i++){const hx=200+((rnd()*112)|0);px(hx,84+((rnd()*6)|0),2,3,'#3a3440');}
+  px(0,102,W,H-102,C.sand);
+  // brook (17:40)
+  for(let x=0;x<40;x++)px(6+x,groundY+8,1,6,(x+((tGlobal*8)|0))%6<3?C.water:'#3a6ea5');
+  srand(5);for(let i=0;i<8;i++)px(8+((rnd()*34)|0),groundY+9+((rnd()*3)|0),2,1,C.gray);
+  px(0,groundY+12,W,H,C.dsand);
+  // David + sling aim
+  dude(p.x,groundY-14,{robe:C.sand,trim:C.clay,hair:'#8a4a2a',f:walkF,skin:'#e0a875'});
+  if(!gol.down&&stones>0){for(let i=1;i<6;i++){const gx=p.x+7+Math.cos(aim)*i*9,gy=groundY-16+Math.sin(aim)*i*9+i*i*.7;
+   if(Math.sin(tGlobal*8+i)>-.3)px(gx,gy,1,1,C.parch);}}
+  goliathDraw(gol.x,groundY,gol.f%2,gol.down);
+  for(const q of projs)px(q.x-1,q.y-1,3,3,C.gray);
+  for(const sp of spears){px(sp.x,sp.y,8,1,C.wood);px(sp.x-2,sp.y-1,3,3,C.gray);}
+  for(let i=0;i<stones;i++)px(8+i*7,14,4,4,C.gray);
+  text('STONES',8,22,C.parch,6);
+  if(gol.down&&gol.fallT<1.8)text('"...and smote the Philistine in his forehead" 17:49',W/2,30,C.gold,7,'center');
+ }};
+}
+
+/* ============ GAME 7: DANIEL (Daniel 6) ============ */
+function makeDaniel(){
+ const p={x:160,y:140};let f=0;
+ const spots=[{x:60,y:34,done:false},{x:160,y:34,done:false},{x:260,y:34,done:false}];
+ const lions=[];for(let i=0;i<4;i++)lions.push({x:60+i*60,y:80+(i%2)*40,tx:0,ty:0,t:0});
+ let praying=0,prayed=0,angelT=0,safe=false,roarT=2;
+ return{
+ update(dt){
+  f+=dt*6;
+  if(safe){angelT+=dt;if(angelT>2.6)gameWin();return;}
+  const spd=58;let mv=false;
+  const atSpot=spots.find(s2=>!s2.done&&dist(p.x,p.y,s2.x,s2.y+14)<11);
+  if(keys.left){p.x-=spd*dt;mv=true}if(keys.right){p.x+=spd*dt;mv=true}
+  if(keys.up){p.y-=spd*dt;mv=true}if(keys.down){p.y+=spd*dt;mv=true}
+  p.x=clamp(p.x,20,292);p.y=clamp(p.y,48,156);
+  if(atSpot&&keys.action&&!mv){praying+=dt;
+   if(praying>=1.6){atSpot.done=true;prayed++;praying=0;sfx.pray();
+    if(prayed>=3){safe=true;sfx.angel();}}}
+  else praying=0;
+  roarT-=dt;
+  for(const L of lions){L.t-=dt;
+   if(L.t<=0){L.t=1.5+Math.random()*2;
+    if(Math.random()<.4){L.tx=p.x;L.ty=p.y;}else{L.tx=30+Math.random()*260;L.ty=55+Math.random()*95;}}
+   const d=dist(L.x,L.y,L.tx,L.ty);
+   if(d>4){L.x+=(L.tx-L.x)/d*30*dt;L.y+=(L.ty-L.y)/d*30*dt;}
+   if(dist(L.x+6,L.y+5,p.x+4,p.y+6)<10)return gameLose(story.loseVerse);
+   if(roarT<=0&&dist(L.x,L.y,p.x,p.y)<60){sfx.roar();roarT=3+Math.random()*3;}}
+ },
+ draw(){
+  px(0,0,W,H,'#141020');
+  // stone floor
+  for(let y=46;y<H;y+=10)for(let x=12+((y/10)%2)*8;x<308;x+=16)px(x,y,15,9,'#2a2436');
+  // walls
+  px(0,0,W,44,'#3a3448');px(0,0,12,H,'#3a3448');px(308,0,12,H,'#3a3448');px(0,H-6,W,6,'#3a3448');
+  for(let x=0;x<W;x+=14)px(x,40,13,3,'#2a2436');
+  // windows toward Jerusalem (6:10) + moonbeams
+  for(const s2 of spots){
+   px(s2.x-6,6,12,26,s2.done?'#1a1c3a':'#101226');
+   px(s2.x-1,2,2,2,C.parch);
+   if(!s2.done){ctx.fillStyle='rgba(240,230,180,.10)';ctx.beginPath();
+    ctx.moveTo(s2.x-6,32);ctx.lineTo(s2.x+6,32);ctx.lineTo(s2.x+16,58);ctx.lineTo(s2.x-16,58);ctx.closePath();ctx.fill();
+    if(Math.sin(tGlobal*4)>0)text('A',s2.x-2,44,C.gold,7);}
+   else px(s2.x-3,14,6,6,C.gold);}
+  // torches
+  for(const tx of [30,290]){px(tx,20,2,8,C.wood);px(tx-1,15+Math.sin(tGlobal*10+tx),4,5,C.gold);px(tx,14+Math.sin(tGlobal*13),2,2,C.red);}
+  for(const L of lions)lionDraw(L.x,L.y,((tGlobal*5)|0)%2,safe);
+  // Daniel
+  if(praying>0||safe){dude(p.x,p.y+3,{robe:C.purple,trim:C.gold,beard:'#2a1e14',f:0});
+   px(p.x+1,p.y+13,6,1,'#141020');}
+  else dude(p.x,p.y,{robe:C.purple,trim:C.gold,beard:'#2a1e14',f:f});
+  if(praying>0)bar(p.x-6,p.y-10,20,praying/1.6,C.gold);
+  if(safe){angelDraw(154,60-Math.max(0,(2.6-angelT)*20),tGlobal);
+   text('"My God hath sent his angel..." 6:22',W/2,120,C.gold,7,'center');}
+  px(0,0,W,0,C.ink);
+  text('PRAYERS '+prayed+'/3',W-8,6,C.parch,7,'right');
+  text('the den of lions — Daniel 6',8,6,C.dsand,6);
+ }};
+}
+
+/* ============ GAME 2: NOAH (Genesis 6-7) ============ */
+function makeNoah(){
+ const TYPES=[['sheep',C.parch],['lion',C.dsand],['camel','#b4854a'],['ox','#6e4a2e'],['goat',C.gray],['dove','#f0f0ff']];
+ const p={x:40,y:100};let f=0;
+ const trail=makeTrail(p.x,p.y);
+ const animals=[];
+ srand(99);
+ for(let t=0;t<6;t++)for(let k=0;k<2;k++)
+  animals.push({type:t,x:20+rnd()*180,y:52+rnd()*110,wt:rnd()*2,wx:0,wy:0,follow:-1,inArk:false});
+ let chain=[],inCount=0,T=0,TOTAL=80,done=false,doneT=0,thT=6;
+ function beastDraw(b,fr){const col=TYPES[b.type][1],nm=TYPES[b.type][0];
+  if(nm==='dove'){px(b.x,b.y+2,5,3,col);px(b.x+4,b.y,3,3,col);px(b.x+6,b.y+1,1,1,C.ink);px(b.x-2,b.y+1+Math.sin(tGlobal*9+b.x),3,2,col);return;}
+  if(nm==='lion'){lionDraw(b.x,b.y-4,fr,false);return;}
+  px(b.x,b.y,8,4,col);px(b.x+7,b.y-2,3,3,col);px(b.x+9,b.y-1,1,1,C.ink);
+  if(nm==='camel')px(b.x+2,b.y-2,3,2,col);
+  if(nm==='ox'){px(b.x+7,b.y-3,1,1,'#d8d0c0');px(b.x+10,b.y-3,1,1,'#d8d0c0');}
+  if(nm==='goat')px(b.x+8,b.y-3,1,1,'#d8d0c0');
+  px(b.x+1,b.y+4,1,2+fr,col);px(b.x+6,b.y+4,1,3-fr,col);}
+ return{
+ update(dt){
+  f+=dt*6;T+=dt;
+  if(done){doneT+=dt;if(doneT>1.6)gameWin();return;}
+  if(T>=TOTAL)return gameLose(story.loseVerse);
+  thT-=dt;if(thT<=0&&T>TOTAL*.6){sfx.thunder();thT=4+Math.random()*5;}
+  const spd=62;
+  if(keys.left)p.x-=spd*dt;if(keys.right)p.x+=spd*dt;
+  if(keys.up)p.y-=spd*dt;if(keys.down)p.y+=spd*dt;
+  p.x=clamp(p.x,6,300);p.y=clamp(p.y,48,164);
+  trail.push(p.x,p.y);
+  for(const a of animals){
+   if(a.inArk)continue;
+   if(a.follow<0){
+    a.wt-=dt;if(a.wt<=0){a.wt=1+Math.random()*2;a.wx=(Math.random()-.5)*24;a.wy=(Math.random()-.5)*24;}
+    a.x=clamp(a.x+a.wx*dt,10,230);a.y=clamp(a.y+a.wy*dt,50,160);
+    if(chain.length<3&&dist(a.x+4,a.y+2,p.x+4,p.y+6)<12){a.follow=chain.length;chain.push(a);sfx.pick();}
+   }else{
+    const tp=trail.get((a.follow+1)*14),d=dist(a.x,a.y,tp.x,tp.y);
+    if(d>3){a.x+=(tp.x-a.x)/d*70*dt;a.y+=(tp.y-a.y)/d*70*dt;}
+    if(a.x>244&&a.y>96&&a.y<136){a.inArk=true;inCount++;sfx.pick();
+     chain=chain.filter(z=>z!==a);chain.forEach((z,i)=>z.follow=i);}}}
+  if(inCount>=12&&p.x>244&&p.y>96&&p.y<136){done=true;sfx.win();}
+ },
+ draw(){
+  const storm=clamp((T-TOTAL*.5)/(TOTAL*.5),0,1);
+  px(0,0,W,46,storm>.5?'#3a3a4a':'#8fb8c8');
+  // rolling clouds
+  srand(3);for(let i=0;i<7;i++){const cx2=((rnd()*W)+tGlobal*(6+i))%(W+60)-30,cy2=6+rnd()*26;
+   px(cx2,cy2,26,7,storm>.4?'#2a2a38':'#e8e8e8');px(cx2+6,cy2-3,14,4,storm>.4?'#2a2a38':'#e8e8e8');}
+  px(0,46,W,H-46,'#7a8a4a');
+  srand(17);for(let i=0;i<40;i++)px((rnd()*240)|0,(48+rnd()*110)|0,2,1,'#6a7a3e');
+  // gopher trees
+  for(const tx of [30,120,200]){px(tx,60,3,10,C.wood);px(tx-4,52,11,9,C.green);}
+  // ark
+  px(240,58,76,96,C.wood);px(240,58,76,6,C.dwood);
+  for(let y=70;y<150;y+=12)px(242,y,72,2,C.dwood);
+  px(236,46,84,14,C.dwood);px(244,50,68,6,C.wood);
+  // door
+  px(244,98,14,38,inCount>=12?C.gold:'#3a2410');
+  text(inCount>=12?'ENTER':'ARK',251,88,C.parch,6,'center');
+  for(const a of animals)if(!a.inArk)beastDraw(a,((tGlobal*5)|0)%2);
+  dude(p.x,p.y,{robe:'#4a5a6a',trim:C.parch,beard:'#e8e2d4',bl:2,head:'#7a8a9a',f:f});
+  if(storm>0){srand((tGlobal*10)|0);const drops=(storm*60)|0;
+   for(let i=0;i<drops;i++)px((rnd()*W)|0,(rnd()*H)|0,1,3,'#9ab8d8');}
+  text('BEASTS '+inCount+'/12',8,6,C.parch,7);
+  bar(W-70,6,62,T/TOTAL,storm>.5?'#5878a8':C.dsand);
+  text('RAIN',W-70,13,C.parch,6);
+  if(done)text('"...and the LORD shut him in." 7:16',W/2,30,C.gold,7,'center');
+ }};
+}
+
+/* ============ GAME 3: MOSES (Exodus 14) ============ */
+function makeMoses(){
+ const TOTAL=1500;
+ const p={x:20,y:100};let f=0,slowT=0;
+ const trail=makeTrail(p.x,p.y);
+ let chariotX=-170,phase=0,closeT=0;
+ const rocks=[],pools=[];
+ srand(42);
+ for(let i=0;i<26;i++)rocks.push({x:180+rnd()*(TOTAL-260),y:62+rnd()*84});
+ for(let i=0;i<14;i++)pools.push({x:220+rnd()*(TOTAL-320),y:60+rnd()*80,w:26+rnd()*20});
+ return{
+ update(dt){
+  f+=dt*7;
+  if(phase===1){closeT+=dt;if(closeT>2.4)gameWin();return;}
+  slowT=Math.max(0,slowT-dt);
+  let spd=76;if(slowT>0)spd=34;
+  let inPool=false;
+  for(const pl of pools)if(p.x+4>pl.x&&p.x<pl.x+pl.w&&Math.abs(p.y+8-pl.y)<7)inPool=true;
+  if(inPool)spd=36;
+  if(keys.left)p.x-=spd*dt*.7;if(keys.right)p.x+=spd*dt;
+  if(keys.up)p.y-=60*dt;if(keys.down)p.y+=60*dt;
+  p.x=clamp(p.x,chariotX+30,TOTAL+40);p.y=clamp(p.y,56,140);
+  trail.push(p.x,p.y);
+  for(const r of rocks)if(dist(p.x+4,p.y+7,r.x+3,r.y+2)<8&&slowT<=0){slowT=.7;p.x-=6;sfx.clank();}
+  chariotX+=64*dt;
+  if(chariotX>=p.x-16)return gameLose(story.loseVerse);
+  if(p.x>=TOTAL){phase=1;sfx.blast();sfx.splash();}
+ },
+ draw(){
+  const cx=clamp(p.x-90,0,TOTAL+60-W);
+  // dry seabed (14:22)
+  px(0,0,W,H,C.sand);
+  srand(8);for(let i=0;i<60;i++){const rx=(rnd()*(TOTAL+60))|0;if(rx-cx>-4&&rx-cx<W)px(rx-cx,(56+rnd()*90)|0,2,1,C.dsand);}
+  // shells & fish left by the sea
+  srand(23);for(let i=0;i<30;i++){const rx=(rnd()*(TOTAL+60))|0,ry=(60+rnd()*80)|0;
+   if(rx-cx>-6&&rx-cx<W){px(rx-cx,ry,3,2,'#d8c8a8');px(rx-cx+3,ry,1,1,'#b8a888');}}
+  for(const pl of pools){const sx=pl.x-cx;if(sx>-60&&sx<W){px(sx,pl.y-4,pl.w,9,'#6a6a4a');px(sx+2,pl.y-2,pl.w-4,5,'#8a8a5a');}}
+  for(const r of rocks){const sx=r.x-cx;if(sx>-10&&sx<W){px(sx,r.y,7,5,C.gray);px(sx+1,r.y-2,4,3,'#a8a49e');}}
+  // walls of water, animated
+  const closing=phase===1?closeT/2.4:0;
+  for(let x=0;x<W;x+=2){const wx=x+cx;
+   let topH=44+Math.sin((wx+tGlobal*36)*.08)*4;
+   let botY=142+Math.sin((wx+tGlobal*30)*.07+2)*4;
+   if(phase===1&&wx<chariotX+80){topH=44+closing*70;botY=142-closing*70;}
+   px(x,0,2,topH,C.water);px(x,topH-3,2,3,'#79a8d8');px(x,topH,2,1,C.parch);
+   px(x,botY,2,H-botY,C.water);px(x,botY,2,3,'#79a8d8');px(x,botY,2,1,C.parch);
+   px(x,0,2,topH*.4,C.dwater);px(x,H-(H-botY)*.4,2,(H-botY)*.4,C.dwater);}
+  // Israelites following
+  for(let i=1;i<=5;i++){const tp=trail.get(i*13);
+   dude(tp.x-cx,tp.y,{robe:[C.clay,C.green,C.purple,C.dsand,'#4a5a6a'][i-1],f:f+i,skin:C.skin});}
+  // Moses with rod
+  dude(p.x-cx,p.y,{robe:C.clay,trim:C.gold,head:C.parch,beard:'#e8e2d4',bl:2,f:f,staff:true});
+  // pillar of cloud/fire behind (14:19-20)
+  const pilX=chariotX+52-cx;
+  if(pilX>-20&&pilX<W){for(let y=0;y<H;y+=4){const wob=Math.sin(y*.2+tGlobal*7)*3;
+   px(pilX+wob,y,8,4,y%8<4?'#e8d8a8':C.gold);px(pilX+wob+2,y,4,4,'#f8f0d0');}}
+  // Pharaoh's chariot
+  const chX=chariotX-cx;
+  if(chX>-40&&chX<W){const cy2=98;
+   px(chX,cy2,20,10,C.gold);px(chX+2,cy2+2,16,6,C.clay);
+   px(chX+2,cy2+10,6,6,C.ink);px(chX+12,cy2+10,6,6,C.ink);
+   px(chX+22,cy2-2,14,8,'#3a3440');px(chX+34,cy2-6,5,5,'#3a3440');
+   px(chX+24,cy2+6,3,10,'#3a3440');px(chX+31,cy2+6,3,10,'#3a3440');
+   dude(chX+4,cy2-11,{robe:C.gold,head:'#2a5a9a',skin:C.dskin,f:0});}
+  if(phase===1&&chX>-60)text('"...the waters returned" 14:28',W/2,88,C.parch,7,'center');
+  bar(8,6,120,p.x/TOTAL,C.green);text('TO THE FAR SHORE',8,13,C.parch,6);
+  if(slowT>0)text('MIRE!',p.x-cx-4,p.y-14,C.red,6);
+ }};
+}
+
+/* ============ GAME 4: JOSHUA (Joshua 6) ============ */
+function makeJoshua(){
+ const cW={x:104,y:52,w:112,h:78};
+ const cx0=cW.x+cW.w/2,cy0=cW.y+cW.h/2;
+ const p={x:160,y:150};let f=0,hp=3,inv=0;
+ let prevAng=Math.atan2(p.y-cy0,p.x-cx0),acc=0,laps=0;
+ let arrows=[],shootT=2,shout=false,shoutT=0;
+ const trail=makeTrail(p.x,p.y);
+ return{
+ update(dt){
+  f+=dt*7;inv=Math.max(0,inv-dt);
+  if(shout){shoutT+=dt;if(shoutT>2.4)gameWin();return;}
+  const spd=64;
+  if(keys.left)p.x-=spd*dt;if(keys.right)p.x+=spd*dt;
+  if(keys.up)p.y-=spd*dt;if(keys.down)p.y+=spd*dt;
+  p.x=clamp(p.x,10,306);p.y=clamp(p.y,26,168);
+  // keep outside the wall
+  if(p.x>cW.x-9&&p.x<cW.x+cW.w+1&&p.y>cW.y-13&&p.y<cW.y+cW.h+1){
+   const dl=p.x-(cW.x-9),dr=(cW.x+cW.w+1)-p.x,dtp=p.y-(cW.y-13),db=(cW.y+cW.h+1)-p.y;
+   const m=Math.min(dl,dr,dtp,db);
+   if(m===dl)p.x=cW.x-9;else if(m===dr)p.x=cW.x+cW.w+1;else if(m===dtp)p.y=cW.y-13;else p.y=cW.y+cW.h+1;}
+  trail.push(p.x,p.y);
+  const ang=Math.atan2(p.y-cy0,p.x-cx0);
+  let d=ang-prevAng;if(d>Math.PI)d-=2*Math.PI;if(d<-Math.PI)d+=2*Math.PI;
+  acc+=d;prevAng=ang;
+  if(Math.abs(acc)>=Math.PI*2){laps++;acc=0;sfx.trumpet();}
+  if(laps>=7&&edge.action){shout=true;sfx.blast();sfx.thunder();}
+  shootT-=dt;
+  if(shootT<=0){shootT=1.5+Math.random()*1.1;
+   const wx=clamp(p.x,cW.x,cW.x+cW.w),wy=clamp(p.y,cW.y,cW.y+cW.h);
+   const dd=dist(wx,wy,p.x,p.y)||1;
+   arrows.push({x:wx,y:wy,vx:(p.x-wx)/dd*72,vy:(p.y-wy)/dd*72});sfx.shoot();}
+  for(const a of arrows){a.x+=a.vx*dt;a.y+=a.vy*dt;
+   if(inv<=0&&dist(a.x,a.y,p.x+4,p.y+6)<6){hp--;inv=1.2;a.dead=true;sfx.hit();
+    if(hp<=0)return gameLose(story.loseVerse);}}
+  arrows=arrows.filter(a=>!a.dead&&a.x>0&&a.x<W&&a.y>0&&a.y<H);
+ },
+ draw(){
+  px(0,0,W,H,C.sand);
+  srand(13);for(let i=0;i<50;i++)px((rnd()*W)|0,(rnd()*H)|0,2,1,C.dsand);
+  for(const tx of [[20,30],[290,150],[26,150],[288,28]]){px(tx[0],tx[1],3,8,C.wood);px(tx[0]-4,tx[1]-7,11,8,C.green);}
+  // Jericho wall + city
+  const cr=shout?Math.min(1,shoutT/1.2):0;
+  const drop=cr*26;
+  px(cW.x,cW.y+drop,cW.w,cW.h-drop*0,'#b09468');
+  for(let y=cW.y;y<cW.y+cW.h;y+=8)for(let x=cW.x+((y/8)%2)*6;x<cW.x+cW.w-6;x+=12)px(x,y+drop,11,7,'#a08458');
+  if(!shout){for(let x=cW.x;x<cW.x+cW.w;x+=10)px(x,cW.y-6,6,6,'#a08458');}
+  // inner city domes
+  px(cx0-22,cy0-8+drop*.6,16,14,C.dclay);px(cx0-19,cy0-14+drop*.6,10,7,C.clay);
+  px(cx0+4,cy0-2+drop*.6,18,12,C.dclay);px(cx0+8,cy0-8+drop*.6,10,7,C.clay);
+  px(cx0-2,cy0-20+drop*.6,5,18,'#a08458');
+  if(shout){srand((tGlobal*14)|0);
+   for(let i=0;i<26;i++)px(cW.x-8+((rnd()*(cW.w+16))|0),cW.y-6+((rnd()*(cW.h+16))|0),3+((rnd()*4)|0),3,rnd()<.5?'#a08458':C.dsand);
+   text('"...the wall fell down flat" 6:20',W/2,12,C.gold,7,'center');}
+  else{ // watchmen
+   srand(4);for(let i=0;i<5;i++){px(cW.x+8+((rnd()*(cW.w-16))|0),cW.y-11,3,5,'#3a3440');}}
+  // ark of the covenant + priests follow (6:6-9)
+  for(let i=1;i<=2;i++){const tp=trail.get(i*13);
+   dude(tp.x,tp.y,{robe:C.parch,trim:C.gold,beard:'#c9c2b4',f:f+i,trumpetp:true});}
+  const ak=trail.get(3*13);px(ak.x-1,ak.y+2,12,7,C.gold);px(ak.x+1,ak.y,8,2,C.gold);
+  if(inv<=0||Math.sin(tGlobal*20)>0)
+   dude(p.x,p.y,{robe:C.iron,trim:C.red,head:'#b08d3e',beard:'#3a2a1a',f:f});
+  for(const a of arrows){px(a.x,a.y,2,2,C.ink);px(a.x-a.vx*.03,a.y-a.vy*.03,1,1,C.wood);}
+  hearts(hp);
+  text('CIRCUITS '+laps+'/7',W-8,4,C.parch,7,'right');
+  if(laps>=7&&!shout)text(Math.sin(tGlobal*7)>0?'>>> SHOUT! PRESS A <<<':'',W/2,166,C.gold,8,'center');
+ }};
+}
+
+/* ============ GAME 5: GIDEON (Judges 7) ============ */
+function makeGideon(){
+ const p={x:20,y:160};let f=0;
+ const tents=[{x:120,y:70},{x:170,y:90},{x:140,y:115},{x:200,y:65},{x:210,y:110},{x:165,y:55}];
+ const marks=[{x:70,y:60,done:false},{x:160,y:24,done:false},{x:262,y:80,done:false}];
+ const guards=[
+  {wp:[[90,140],[240,140]],i:0,x:90,y:140},
+  {wp:[[100,40],[250,40]],i:0,x:250,y:40},
+  {wp:[[80,60],[80,130]],i:0,x:80,y:100},
+  {wp:[[252,50],[252,130]],i:0,x:252,y:120}];
+ let placed=0,finale=false,finT=0,plant=0;
+ function blocked(x1,y1,x2,y2){ // tents block sight
+  for(const t2 of tents){const mx=t2.x+9,my=t2.y+6;
+   const L=dist(x1,y1,x2,y2);if(L<1)continue;
+   const t3=clamp(((mx-x1)*(x2-x1)+(my-y1)*(y2-y1))/(L*L),0,1);
+   if(dist(x1+(x2-x1)*t3,y1+(y2-y1)*t3,mx,my)<10)return true;}
+  return false;}
+ return{
+ update(dt){
+  f+=dt*6;
+  if(finale){finT+=dt;if(finT>2.6)gameWin();return;}
+  const spd=58;let mv=false;
+  if(keys.left){p.x-=spd*dt;mv=true}if(keys.right){p.x+=spd*dt;mv=true}
+  if(keys.up){p.y-=spd*dt;mv=true}if(keys.down){p.y+=spd*dt;mv=true}
+  p.x=clamp(p.x,8,304);p.y=clamp(p.y,18,166);
+  for(const g2 of guards){const t2=g2.wp[g2.i],d=dist(g2.x,g2.y,t2[0],t2[1]);
+   if(d<2)g2.i=(g2.i+1)%g2.wp.length;
+   else{g2.x+=(t2[0]-g2.x)/d*24*dt;g2.y+=(t2[1]-g2.y)/d*24*dt;}
+   g2.fx=(t2[0]-g2.x)/(d||1);g2.fy=(t2[1]-g2.y)/(d||1);
+   const dd=dist(g2.x,g2.y,p.x+4,p.y+6);
+   if(dd<48){const dot=((p.x+4-g2.x)*g2.fx+(p.y+6-g2.y)*g2.fy)/(dd||1);
+    if(dot>.72&&!blocked(g2.x,g2.y,p.x+4,p.y+6))return gameLose(story.loseVerse);}}
+  const m=marks.find(m2=>!m2.done&&dist(p.x+4,p.y+6,m2.x,m2.y)<11);
+  if(m&&keys.action&&!mv){plant+=dt;
+   if(plant>=1.2){m.done=true;placed++;plant=0;sfx.pick();}}
+  else plant=0;
+  if(placed>=3&&edge.action){finale=true;sfx.blast();sfx.trumpet();noiseSfx(.4,.35,2400);}
+ },
+ draw(){
+  px(0,0,W,H,'#141828');
+  srand(21);for(let i=0;i<60;i++)px((rnd()*W)|0,(rnd()*H)|0,1,1,rnd()<.15?C.gold:'#8890b8');
+  px(280,10,12,12,C.parch);px(277,8,10,12,'#141828');
+  srand(55);for(let i=0;i<40;i++)px((rnd()*W)|0,(rnd()*H)|0,2,1,'#1a2030');
+  if(finale){ // flash + rout
+   if(finT<.5)px(0,0,W,H,'rgba(245,236,215,'+(0.7-finT)+')');
+   srand(9);for(let i=0;i<20;i++){const gx=120+rnd()*100+finT*(rnd()*80+30),gy=50+rnd()*80;
+    dude(gx,gy,{robe:'#3a3440',f:(tGlobal*8)|0,skin:C.dskin});}
+   text('"The sword of the LORD, and of Gideon!" 7:20',W/2,14,C.gold,8,'center');}
+  else for(const g2 of guards){
+   ctx.fillStyle='rgba(240,181,65,.08)';ctx.beginPath();ctx.moveTo(g2.x,g2.y);
+   const a0=Math.atan2(g2.fy||0,g2.fx||1);
+   ctx.arc(g2.x,g2.y,48,a0-.72,a0+.72);ctx.closePath();ctx.fill();
+   dude(g2.x-4,g2.y-6,{robe:'#3a3440',f:(tGlobal*5)|0,skin:C.dskin,head:'#2a2434'});}
+  for(const t2 of tents){px(t2.x,t2.y+6,18,6,'#5e4a3a');
+   for(let i=0;i<9;i++)px(t2.x+i,t2.y+6-Math.min(i,17-i)*.8,1,7,'#7a6248');
+   px(t2.x+8,t2.y-2,2,3,C.wood);}
+  // campfires
+  for(const fx of [[130,100],[195,88]]){px(fx[0],fx[1],5,2,C.wood);
+   px(fx[0]+1,fx[1]-3+Math.sin(tGlobal*11+fx[0]),3,3,C.gold);px(fx[0]+2,fx[1]-4,1,2,C.red);}
+  for(const m of marks){
+   if(m.done){px(m.x-1,m.y-6,2,6,C.wood);px(m.x-2,m.y-9,4,4,C.gold);}
+   else{px(m.x-4,m.y+3,8,2,Math.sin(tGlobal*4)>0?C.gold:C.dsand);
+    text('A',m.x-2,m.y-8,C.gold,7);}}
+  dude(p.x,p.y,{robe:C.green,trim:C.wood,beard:'#3a2a1a',f:f,torch:placed>0&&!finale});
+  if(plant>0)bar(p.x-6,p.y-10,20,plant/1.2,C.gold);
+  text('COMPANIES '+placed+'/3',8,6,C.parch,7);
+  if(placed>=3&&!finale)text(Math.sin(tGlobal*7)>0?'>>> PRESS A: TRUMPETS & PITCHERS <<<':'',W/2,166,C.gold,7,'center');
+  else text('stay out of the torchlight of the watch',W/2,172,C.dsand,6,'center');
+ }};
+}
+
+/* ============ GAME 1: ABRAHAM (Genesis 22) ============ */
+function makeAbraham(){
+ const LEN=1300;
+ // ascending terrain segments with gaps
+ const segs=[];let sx=0,sy=158;
+ srand(77);
+ while(sx<LEN){const w=70+rnd()*90;segs.push({x0:sx,x1:sx+w,y:sy});
+  sx+=w+(sx>140&&sx<LEN-160?16+rnd()*14:0);sy-=8+rnd()*8;}
+ const last=segs[segs.length-1];const altarX=last.x1-30,topY=last.y;
+ const p={x:20,y:groundAt(20)-12,vy:0,on:true};
+ let f=0,hp=3,inv=0,phase=0,phT=0;
+ const trail=makeTrail(p.x,p.y);
+ let rocks=[],rockT=2.5;
+ function groundAt(x){for(const s2 of segs)if(x>=s2.x0&&x<=s2.x1)return s2.y;return 999;}
+ return{
+ update(dt){
+  f+=dt*7;inv=Math.max(0,inv-dt);
+  if(phase===1){phT+=dt;if(phT>3){phase=2;sfx.pick();}return;}
+  if(phase===2){
+   const spd=52;
+   if(keys.left)p.x-=spd*dt;if(keys.right)p.x+=spd*dt;
+   p.x=clamp(p.x,altarX-120,altarX+8);p.y=groundAt(p.x)-12;
+   trail.push(p.x,p.y);
+   if(Math.abs(p.x-(altarX-64))<10&&edge.action)gameWin();
+   return;}
+  const spd=56;
+  if(keys.left)p.x-=spd*dt;if(keys.right)p.x+=spd*dt;p.x=clamp(p.x,4,LEN);
+  const g=groundAt(p.x+4);
+  if(p.on&&(edge.up||edge.action)){p.vy=-118;p.on=false;sfx.step();}
+  p.vy+=300*dt;p.y+=p.vy*dt;
+  if(g<900&&p.y>=g-12&&p.vy>=0){p.y=g-12;p.vy=0;p.on=true;}else if(p.vy!==0)p.on=false;
+  if(p.y>H+10){hp--;sfx.splash();
+   if(hp<=0)return gameLose(story.loseVerse);
+   const s2=segs.find(z=>z.x1>p.x)||segs[0];p.x=s2.x0+8;p.y=s2.y-12;p.vy=0;inv=1.5;}
+  trail.push(p.x,p.y);
+  rockT-=dt;
+  if(rockT<=0&&p.x<altarX-60){rockT=2.2+Math.random()*1.6;
+   rocks.push({x:p.x+180,y:groundAt(p.x+180)-60,vx:-52,vy:0});}
+  for(const r of rocks){r.vx-=6*dt;r.x+=r.vx*dt;const rg=groundAt(r.x);
+   r.vy+=280*dt;r.y+=r.vy*dt;
+   if(rg<900&&r.y>rg-5){r.y=rg-5;r.vy=-90;}
+   if(inv<=0&&dist(r.x,r.y,p.x+4,p.y+6)<8){hp--;inv=1.4;sfx.hit();
+    if(hp<=0)return gameLose(story.loseVerse);}}
+  rocks=rocks.filter(r=>r.x>p.x-200&&r.y<H+40);
+  if(p.x>=altarX-6){phase=1;phT=0;sfx.angel();}
+ },
+ draw(){
+  const cx=clamp(p.x-80,0,LEN+40-W);
+  px(0,0,W,H,'#c9dae8');px(0,0,W,50,'#a9c4dc');
+  px(30-cx*.2,14,14,14,C.gold);
+  // far ridges
+  for(let x=0;x<W;x+=2){px(x,86+Math.sin((x+cx*.4)*.02)*10,2,H,'#b0a284');}
+  // mountain terrain
+  for(const s2 of segs){const x0=s2.x0-cx,x1=s2.x1-cx;
+   if(x1<0||x0>W)continue;
+   px(x0,s2.y,x1-x0,H-s2.y,'#8a7454');px(x0,s2.y,x1-x0,3,'#a08c68');
+   srand(s2.x0);for(let i=0;i<6;i++)px(x0+rnd()*(x1-x0),s2.y+4+rnd()*20,2,2,'#7a6448');}
+  // thicket + ram (after angel)
+  if(phase>=1){const tx2=altarX-64-cx;
+   px(tx2-6,topY-8,20,8,C.green);px(tx2-3,topY-11,14,5,'#4a7a30');
+   if(phase===2){ramDraw(tx2,topY-9);
+    if(Math.abs(p.x-(altarX-64))<10)text('A: TAKE THE RAM',tx2-14,topY-26,C.gold,7);}}
+  // altar
+  const ax=altarX-cx;
+  px(ax,topY-10,22,10,C.gray);px(ax+2,topY-13,18,3,'#a8a49e');
+  for(let i=0;i<4;i++)px(ax+3+i*4,topY-16,3,3,C.wood);
+  // Isaac follows
+  if(phase===0){const tp=trail.get(16);dude(tp.x-cx,tp.y+2,{robe:C.sand,hair:'#3a2a1a',f:f,skin:'#e0a875'});
+   px(tp.x-cx+1,tp.y+3,6,2,C.wood);}
+  else dude(altarX-40-cx,topY-12,{robe:C.sand,hair:'#3a2a1a',f:0,skin:'#e0a875'});
+  // Abraham
+  if(inv<=0||Math.sin(tGlobal*20)>0)
+   dude(p.x-cx,p.y,{robe:C.wood,trim:C.gold,head:C.parch,beard:'#c9c2b4',bl:2,f:p.on?f:1,staff:phase===0});
+  for(const r of rocks)px(r.x-3-cx,r.y-3,6,6,C.gray);
+  if(phase===1){angelDraw(ax-10,topY-52+Math.sin(tGlobal*2)*3,tGlobal);
+   let yy=16;for(const ln of wrap('"Lay not thine hand upon the lad... for now I know that thou fearest God" — 22:12',56)){text(ln,W/2,yy,C.gold,7,'center');yy+=9;}
+   text('"...behold behind him a ram caught in a thicket" 22:13',W/2,yy+2,C.parch,6,'center');}
+  hearts(hp);
+  if(phase===0)bar(W-70,6,62,p.x/altarX,C.dsand),text('MORIAH',W-70,13,C.parch,6);
+  if(phase===0&&p.x<60)text('UP/A: LEAP THE CLEFTS',W/2,166,C.dsand,6,'center');
+ }};
+}
+
+/* ============ GAME 8: PETER (Matthew 14) ============ */
+function makePeter(){
+ const seaY=118;
+ const p={x:26};let f=0,faith=1,gust=0,gustT=3.5,nextG=0,won=false;
+ return{
+ update(dt){
+  f+=dt*6;
+  if(gust>0){gust-=dt;
+   if(keys.action)faith=Math.min(1,faith+.3*dt);
+   else{faith-=.4*dt;p.x-=7*dt;}}
+  else{gustT-=dt;faith=Math.min(1,faith+.09*dt);
+   if(gustT<=0){gust=1.4+Math.random()*1.2;gustT=2.6+Math.random()*3;noiseSfx(gust,.22,700);}}
+  if(!(gust>0&&keys.action)){
+   if(keys.right)p.x+=44*dt;if(keys.left)p.x-=44*dt;}
+  p.x=clamp(p.x,22,282);
+  if(faith<=0){sfx.splash();return gameLose(story.loseVerse);}
+  if(p.x>=272)gameWin();
+ },
+ draw(){
+  px(0,0,W,H,'#10142a');
+  srand(19);for(let i=0;i<60;i++)px((rnd()*W)|0,(rnd()*80)|0,1,1,rnd()<.2?C.gold:'#c8d0e8');
+  px(258,14,16,16,C.parch);px(254,12,13,16,'#10142a');
+  // sea — rows of sine waves
+  px(0,seaY,W,H-seaY,'#16305a');
+  for(let row=0;row<6;row++){const y=seaY+4+row*10;
+   for(let x=0;x<W;x+=4){const h=Math.sin(x*.09+tGlobal*(2+row*.5)+row*2)*2;
+    px(x,y+h,4,2,row%2?'#20406e':'#2a5088');
+    if(Math.sin(x*.09+tGlobal*3+row)>.92)px(x,y+h-1,3,1,'#8fb0d8');}}
+  // ship (14:24)
+  px(0,seaY-14,34,12,C.dwood);px(2,seaY-16,30,3,C.wood);
+  px(14,seaY-38,2,24,C.wood);px(16,seaY-36,12,14,C.parch);
+  dude(4,seaY-28,{robe:'#4a5a6a',f:0,skin:C.skin});dude(22,seaY-28,{robe:C.dclay,f:0,skin:C.skin});
+  // Jesus, glowing on the sea
+  ctx.fillStyle='rgba(245,236,215,.14)';ctx.fillRect(276,seaY-26,20,26);
+  dude(280,seaY-22+Math.sin(tGlobal*1.5),{robe:C.parch,beard:'#5e3c1c',hair:'#5e3c1c',f:0,skin:'#e0b088'});
+  px(282,seaY-26,4,1,C.gold);
+  // Peter — sinks as faith falls
+  const sink=(1-faith)*13;
+  const py=seaY-11+sink+Math.sin(tGlobal*2.5)*1.5;
+  dude(p.x,py,{robe:'#2e6e6a',trim:C.parch,beard:'#5e3c1c',hair:'#5e3c1c',f:f,skin:'#cf9a5e'});
+  px(p.x-1,seaY+2,10,3,'#2a5088');
+  if(sink>5)for(let i=0;i<3;i++)px(p.x-2+i*5,seaY+Math.sin(tGlobal*8+i)*2,2,2,'#8fb0d8');
+  // wind streaks
+  if(gust>0){srand((tGlobal*12)|0);
+   for(let i=0;i<12;i++){const wy=20+rnd()*120,wx=(W-((tGlobal*260+i*40)%(W+40)));
+    px(wx,wy,14+rnd()*10,1,'#aab8d8');}
+   text(Math.sin(tGlobal*8)>0?'THE WIND IS BOISTEROUS — HOLD A, LOOK TO HIM':'',W/2,30,C.gold,7,'center');}
+  bar(8,6,90,faith,faith>.4?C.gold:C.red);
+  text('FAITH',8,13,C.parch,6);
+  if(gust>0&&keys.action)text('"Be of good cheer; it is I; be not afraid." 14:27',W/2,44,C.parch,6,'center');
+ }};
+}
+
+/* ============ MAIN LOOP ============ */
+let last=0;
+function loop(ts){
+ const dt=Math.min(.05,((ts-last)/1000)||0);last=ts;tGlobal+=dt;
+ updEdges();musicTick();
+ if(screen==='menu'){menuUpdate();menuDraw();}
+ else if(screen==='intro'){introDraw();if(edge.action||tap())startGame();}
+ else if(screen==='game'){game.update(dt);game.draw();}
+ else if(screen==='win'){winDraw();if(edge.action||tap())screen='menu';}
+ else if(screen==='lose'){loseDraw();
+  if(edge.action||tap()){if(keys.down)screen='menu';else startGame();}}
+ clickPt=null;
+ requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
